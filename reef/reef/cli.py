@@ -22,13 +22,14 @@ def doctor(ctx: Context, notify: bool) -> int:
         print(f"[x] missing settings: {', '.join(missing)} (see .env.example)")
         return 1
     try:
-        print(f"[ok] Apify token works - account '{ctx.apify.username()}'")
+        print(f"[ok] Apify token works - account '{ctx.apify.username()}'", flush=True)
         usage = ctx.apify.monthly_usage_usd()
         print(f"[ok] Apify usage this month: {'unknown' if usage is None else f'${usage:.2f}'}")
     except Exception as exc:
         problems += 1
         print(f"[x] Apify: {exc}")
     try:
+        print("     Choosing and testing OpenRouter models - this takes 1-5 minutes the first time...", flush=True)
         free, paid = ctx.llm.models()  # type: ignore[attr-defined]
         print(f"[ok] OpenRouter free models: {', '.join(free) or 'NONE'}")
         print(f"[ok] OpenRouter paid fallback: {paid or 'none (free only)'}")

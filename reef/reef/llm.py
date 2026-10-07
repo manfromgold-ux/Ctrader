@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import httpx
 
 from .state import DAY, State, month_start
 
+log = logging.getLogger("reef.llm")
 API = "https://openrouter.ai/api/v1"
 # Preference order when picking models automatically from OpenRouter's live catalogue.
 FREE_PREFERENCES = [r"coder", r"qwen3", r"deepseek", r"gpt-oss", r"kimi", r"glm", r"llama-3\.3-70b", r"gemma"]
@@ -21,6 +23,7 @@ FREE_MIN_INTERVAL_S = 3.2  # OpenRouter allows 20 requests/minute on free models
 RATE_LIMIT_RETRY_WAIT_S = 20.0
 MODELS_CACHE_KEY = "openrouter_models_v2"  # bump to discard cached picks made by older selection logic
 PROBE_SYSTEM = 'Reply with exactly this JSON and nothing else: {"ok": true}'
+PROBE_TIMEOUT_S = 45.0  # a model that cannot answer "ping" in 45s is no use to us today
 
 
 class LLMError(RuntimeError):
@@ -162,20 +165,28 @@ class OpenRouter:
         """Keep models that answer a tiny JSON task. Rate-limited ones are kept as backups (busy is not
         broken); anything that errors otherwise or answers wrongly is dropped."""
         working, busy = [], []
-        for model in candidates:
+        for i, model in enumerate(candidates, 1):
             if len(working) >= keep:
                 break
             if not paid:
                 self._wait_free_slot()
+            log.info("testing model %d/%d: %s", i, len(candidates), model)
             try:
-                text, cost = self._call(model, PROBE_SYSTEM, "ping", max_tokens=400, paid=paid)
+                text, cost = self._call(model, PROBE_SYSTEM, "ping", max_tokens=1000, paid=paid,
+                                        timeout=PROBE_TIMEOUT_S)
                 self.state.record_llm_call(model, "probe", cost, True)
                 if extract_json(text) == {"ok": True}:
                     working.append(model)
+                    log.info("  ok")
+                else:
+                    log.info("  dropped: answered %r", text[:60])
             except (LLMError, httpx.HTTPError) as exc:
                 self.state.record_llm_call(model, "probe", 0.0, False)
                 if _rate_limited(exc):
                     busy.append(model)
+                    log.info("  busy (kept as backup)")
+                else:
+                    log.info("  dropped: %s", str(exc)[:120])
         return (working + busy)[:keep]
 
     def _wait_free_slot(self) -> None:
@@ -188,7 +199,8 @@ class OpenRouter:
         return self.monthly_budget_usd - self.state.llm_spend_since(month_start())
 
     # ---- calls -----------------------------------------------------------------------------
-    def _call(self, model: str, system: str, user: str, max_tokens: int, paid: bool = False) -> tuple[str, float]:
+    def _call(self, model: str, system: str, user: str, max_tokens: int, paid: bool = False,
+              timeout: float | None = None) -> tuple[str, float]:
         body = {
             "model": model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -196,7 +208,8 @@ class OpenRouter:
             "temperature": 0.2,
             "usage": {"include": True},
         }
-        resp = self._http.post("/chat/completions", json=body)
+        resp = self._http.post("/chat/completions", json=body,
+                               **({"timeout": httpx.Timeout(timeout, connect=20)} if timeout else {}))
         if resp.status_code != 200:
             raise LLMError(f"{model}: HTTP {resp.status_code} {resp.text[:200]}")
         data = resp.json()
