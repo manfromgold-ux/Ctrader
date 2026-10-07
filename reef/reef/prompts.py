@@ -22,7 +22,8 @@ EXTRACTOR_RULES = """Extractor module rules (Python 3.12):
   8601 strings. Missing values are None, never "N/A".
 - "next" contains only pagination/listing URLs on the same site, never detail pages already in items.
 - Must not crash on unexpected markup: guard every lookup.
-- Never extract personal data about private individuals (no emails, phone numbers, or names of people)."""
+- Never extract personal data about private individuals (no emails, phone numbers, or names of people).
+- Keep the module short and plain: under 120 lines, few comments, no multi-line string literals."""
 
 SCOUT_SYSTEM = """You find profitable gaps for a marketplace of paid web scrapers (Apify Store). Buyers are
 businesses that need fresh structured data from one website on a recurring basis. You only propose sites

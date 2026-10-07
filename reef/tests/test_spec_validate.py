@@ -65,3 +65,13 @@ def test_dotenv_tolerates_notepad(tmp_path, monkeypatch):
     load_dotenv(env)
     import os
     assert os.environ["REEF_T1"] == "abc" and os.environ["REEF_T2"] == "" and os.environ["REEF_T3"] == "quoted"
+
+
+def test_syntax_error_context_points_at_the_line():
+    from reef.jobs.spawn import _error_context
+
+    code = "\n".join(f"x{i} = {i}" for i in range(1, 20)) + "\ny = 'oops\n"
+    ctx = _error_context("start_urls() failed: SyntaxError: unterminated string literal (detected at line 20) "
+                         "(line 20)", code)
+    assert "  20: y = 'oops" in ctx and "  17: x17 = 17" in ctx
+    assert _error_context("parse() crashed: KeyError", code) == ""

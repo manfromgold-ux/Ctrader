@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from ..context import Context
@@ -37,6 +38,16 @@ def _unique_name(ctx: Context, spec: ActorSpec) -> None:
         n += 1
 
 
+def _error_context(failure: str, code: str) -> str:
+    """For a syntax error, show the model the exact lines around it (the code shown later may be cut)."""
+    m = re.search(r"SyntaxError.*?\(line (\d+)\)", failure)
+    if not m:
+        return ""
+    n, lines = int(m.group(1)), code.splitlines()
+    snippet = "\n".join(f"{i:>4}: {lines[i - 1]}" for i in range(max(1, n - 3), min(len(lines), n + 2) + 1))
+    return f"\n\nThe error is here:\n{snippet}\nIf your code was cut off, write a shorter module."
+
+
 def design(ctx: Context, cand: dict, page_url: str, page_html: str) -> tuple[ActorSpec, str, Check] | str:
     """Ask the model for a spec + extractor and iterate on test feedback. Returns the result or a failure."""
     feedback = ""
@@ -44,7 +55,7 @@ def design(ctx: Context, cand: dict, page_url: str, page_html: str) -> tuple[Act
         try:
             reply = ctx.llm.complete(BUILD_SYSTEM,
                                      build_user(cand, page_url, trim_html(page_html, ctx.cfg.html_prompt_chars), feedback),
-                                     purpose="build", max_tokens=8000, prefer_paid=attempt > 0)
+                                     purpose="build", max_tokens=16000, prefer_paid=attempt > 0)
         except LLMError as exc:
             return f"LLM unavailable: {exc}"
         raw_spec, code = extract_json(reply.text, "json"), extract_block(reply.text, "python")
@@ -61,7 +72,8 @@ def design(ctx: Context, cand: dict, page_url: str, page_html: str) -> tuple[Act
             return spec, code, check
         if check.blocked:
             return f"site blocks automated access: {check.failure}"
-        feedback = f"{check.failure[:3000]}\n\nYour previous extractor was:\n```python\n{code[:6000]}\n```"
+        feedback = (f"{check.failure[:3000]}{_error_context(check.failure, code)}\n\n"
+                    f"Your previous extractor was:\n```python\n{code[:6000]}\n```")
         if check.pages and check.pages[0][0] != page_url:
             page_url, page_html = check.pages[0]
         log.info("build attempt %d for %s failed: %s", attempt + 1, cand["domain"], feedback[:200])

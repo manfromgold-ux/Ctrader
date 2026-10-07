@@ -67,7 +67,7 @@ def repair(ctx: Context, row, spec: ActorSpec, check: Check) -> tuple[str, str]:
         try:
             reply = ctx.llm.complete(
                 HEAL_SYSTEM, heal_user(spec.to_dict(), code, failure, url, trim_html(page_html, ctx.cfg.html_prompt_chars)),
-                purpose="heal", max_tokens=8000, prefer_paid=attempt > 0)
+                purpose="heal", max_tokens=16000, prefer_paid=attempt > 0)
         except LLMError as exc:
             failure = f"LLM unavailable: {exc}"
             break
