@@ -1,0 +1,3 @@
+-r requirements.txt
+apify>=4,<5
+pytest>=8
