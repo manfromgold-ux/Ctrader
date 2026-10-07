@@ -21,7 +21,7 @@ PAID_PREFERENCES = [r"qwen3-coder", r"deepseek-(chat|v3)", r"kimi-k2", r"gpt-oss
 PER_CALL_FEES = ("request", "image", "audio", "web_search")
 FREE_MIN_INTERVAL_S = 3.2  # OpenRouter allows 20 requests/minute on free models
 RATE_LIMIT_RETRY_WAIT_S = 20.0
-MODELS_CACHE_KEY = "openrouter_models_v2"  # bump to discard cached picks made by older selection logic
+MODELS_CACHE_KEY = "openrouter_models_v3"  # bump to discard cached picks made by older selection logic
 PROBE_SYSTEM = 'Reply with exactly this JSON and nothing else: {"ok": true}'
 PROBE_TIMEOUT_S = 45.0  # a model that cannot answer "ping" in 45s is no use to us today
 
@@ -69,8 +69,9 @@ def is_text_chat_model(m: dict) -> bool:
     return modality.startswith("text") and modality.endswith("->text")
 
 
-def pick_models(catalogue: list[dict], max_paid_price_per_mtok: float, n_free: int = 10) -> tuple[list[str], str]:
-    """Choose free-model candidates and one paid model from OpenRouter's /models payload.
+def pick_models(catalogue: list[dict], max_paid_price_per_mtok: float,
+                n_free: int = 10) -> tuple[list[str], list[str]]:
+    """Choose free-model candidates and up to 3 paid candidates from OpenRouter's /models payload.
 
     Free means an official ':free' variant whose every price component is zero. Both lists contain only
     text chat models; anything with per-request, image or audio fees is skipped.
@@ -95,7 +96,7 @@ def pick_models(catalogue: list[dict], max_paid_price_per_mtok: float, n_free: i
             paid.append((_match_order(mid, PAID_PREFERENCES), completion_per_m, mid))
     free.sort()
     paid.sort()
-    return [m for _, _, m in free[:n_free]], (paid[0][2] if paid else "")
+    return [m for _, _, m in free[:n_free]], [m for _, _, m in paid[:3]]
 
 
 def extract_block(text: str, lang: str) -> str | None:
@@ -154,9 +155,10 @@ def extract_objects(text: str) -> list[dict]:
     return objects
 
 
-def _rate_limited(exc: Exception) -> bool:
+def _transient(exc: Exception) -> bool:
+    """Rate limits and overloaded/unavailable upstreams: the model is fine, just busy right now."""
     text = str(exc).lower()
-    return "429" in text or "rate" in text
+    return any(m in text for m in ("429", "rate", "503", "502", "overloaded", "temporarily", "timed out", "timeout"))
 
 
 class OpenRouter:
@@ -185,15 +187,15 @@ class OpenRouter:
         if not cached or time.time() - cached["ts"] > DAY:
             resp = self._http.get("/models")
             resp.raise_for_status()
-            free, paid = pick_models(resp.json().get("data", []), self.max_paid_price_per_mtok)
+            free, paid_candidates = pick_models(resp.json().get("data", []), self.max_paid_price_per_mtok)
             free = self._free or self._probe(free, keep=5)
-            if paid and self._auto_paid and not self._probe([paid], keep=1, paid=True):
-                paid = ""
+            paid_ok = self._probe(paid_candidates, keep=1, paid=True, keep_busy=False) if self._auto_paid else []
+            paid = paid_ok[0] if paid_ok else ""
             cached = {"ts": time.time(), "free": free, "paid": paid}
             self.state.put(MODELS_CACHE_KEY, cached)
         return (self._free or cached["free"]), (self._paid or (cached["paid"] if self._auto_paid else ""))
 
-    def _probe(self, candidates: list[str], keep: int, paid: bool = False) -> list[str]:
+    def _probe(self, candidates: list[str], keep: int, paid: bool = False, keep_busy: bool = True) -> list[str]:
         """Keep models that answer a tiny JSON task. Rate-limited ones are kept as backups (busy is not
         broken); anything that errors otherwise or answers wrongly is dropped."""
         working, busy = [], []
@@ -214,12 +216,12 @@ class OpenRouter:
                     log.info("  dropped: answered %r", text[:60])
             except (LLMError, httpx.HTTPError) as exc:
                 self.state.record_llm_call(model, "probe", 0.0, False)
-                if _rate_limited(exc):
+                if _transient(exc):
                     busy.append(model)
                     log.info("  busy (kept as backup)")
                 else:
                     log.info("  dropped: %s", str(exc)[:120])
-        return (working + busy)[:keep]
+        return (working + (busy if keep_busy else []))[:keep]
 
     def _wait_free_slot(self) -> None:
         wait = FREE_MIN_INTERVAL_S - (time.monotonic() - self._last_free_call)
@@ -250,6 +252,8 @@ class OpenRouter:
         choices = data.get("choices") or []
         text = (choices[0].get("message") or {}).get("content") if choices else None
         if not text:
+            if choices and choices[0].get("finish_reason") == "length":
+                raise LLMError(f"{model}: used all {max_tokens} tokens thinking before answering")
             raise LLMError(f"{model}: empty completion")
         usage = data.get("usage") or {}
         cost = float(usage.get("cost") or 0.0)
@@ -284,7 +288,7 @@ class OpenRouter:
                 except (LLMError, httpx.HTTPError) as exc:
                     self.state.record_llm_call(model, purpose, 0.0, False)
                     errors.append(str(exc)[:160])
-                    rate_limited |= not is_paid and _rate_limited(exc)
+                    rate_limited |= not is_paid and _transient(exc)
             if attempt == 0 and rate_limited:
                 time.sleep(RATE_LIMIT_RETRY_WAIT_S)
                 order = free_pass  # second pass: free models only; the paid one already had its turn

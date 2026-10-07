@@ -39,7 +39,7 @@ CATALOGUE = [
 def test_pick_models_only_true_free_text_models():
     free, paid = pick_models(CATALOGUE, max_paid_price_per_mtok=3.0)
     assert free == ["qwen/qwen3-coder:free", "meta-llama/llama-3.3-70b-instruct:free"]
-    assert paid == "qwen/qwen3-coder"
+    assert paid == ["qwen/qwen3-coder"]
 
 
 def _chat(text, cost=0.0):
@@ -63,7 +63,7 @@ def test_probe_drops_models_that_cannot_chat(tmp_path, monkeypatch):
     llm = OpenRouter("k", state, client=_client(handler))
     free, paid = llm.models()
     assert free == ["qwen/qwen3-coder:free"] and paid == "qwen/qwen3-coder"
-    assert state.get("openrouter_models_v2")["free"] == free  # cached under the new key
+    assert state.get("openrouter_models_v3")["free"] == free  # cached under the new key
 
 
 def test_extract_blocks():
@@ -121,6 +121,7 @@ def test_free_only_gets_second_pass_after_rate_limit(tmp_path, monkeypatch):
 
 def test_budget_cap_blocks_paid(tmp_path, monkeypatch):
     monkeypatch.setattr("reef.llm.FREE_MIN_INTERVAL_S", 0)
+    monkeypatch.setattr("reef.llm.RATE_LIMIT_RETRY_WAIT_S", 0)
     state = State(tmp_path / "db")
     state.record_llm_call("qwen/qwen3-coder", "earlier", 5.0, True)
 
@@ -151,3 +152,24 @@ def test_salvages_truncated_or_partly_broken_lists():
     assert [i["domain"] for i in ideas_from(cut_off)] == ["tender.gov.ua", "ok.cz"]
     assert ideas_from('{"sites": [{"domain": "a.pl", "start_url": "https://a.pl"}]}')[0]["domain"] == "a.pl"
     assert ideas_from("I only make music") == []
+
+
+def test_overloaded_counts_as_busy_and_thinking_models_get_clear_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.llm.FREE_MIN_INTERVAL_S", 0)
+    monkeypatch.setattr("reef.llm.RATE_LIMIT_RETRY_WAIT_S", 0)
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content)["model"])
+        if len(calls) == 1:
+            return httpx.Response(200, json={"error": {"message": "Upstream error: Service temporarily overloaded",
+                                                       "code": 503}})
+        if len(calls) == 2:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+        return _chat("hello")
+
+    llm = OpenRouter("k", State(tmp_path / "db"), free_models=["a/b:free"], paid_model="", client=_client(handler))
+    with pytest.raises(LLMError, match="tokens thinking"):
+        llm.complete("s", "u", purpose="t", allow_paid=False)  # overloaded -> retried -> ran out of tokens
+    assert calls == ["a/b:free", "a/b:free"]
+    assert llm.complete("s", "u", purpose="t", allow_paid=False).text == "hello"

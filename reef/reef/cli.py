@@ -35,9 +35,14 @@ def doctor(ctx: Context, notify: bool) -> int:
         print(f"[ok] OpenRouter paid fallback: {paid or 'none (free only)'}")
         if not free and not paid:
             problems += 1
-        reply = ctx.llm.complete("Reply with the single word: pong", "ping", purpose="doctor", max_tokens=20,
-                                 allow_paid=False)
-        print(f"[ok] {reply.model} answered: {reply.text.strip()[:40]!r}")
+            print("[x] OpenRouter: no usable model found - check the key and that you bought the $10 of credits")
+        else:
+            try:  # free models are often briefly overloaded; that is not a setup problem
+                reply = ctx.llm.complete("Reply with the single word: pong", "ping", purpose="doctor",
+                                         max_tokens=1500, allow_paid=False)
+                print(f"[ok] {reply.model} answered: {reply.text.strip()[:40]!r}")
+            except Exception as exc:
+                print(f"[!] free models are busy right now ({str(exc)[:120]}...). Reef retries on its own.")
     except Exception as exc:
         problems += 1
         print(f"[x] OpenRouter: {exc}")
