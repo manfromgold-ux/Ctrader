@@ -23,6 +23,9 @@ edit_env() {
   fi
 }
 
+# An older setup could leave a FOLDER named .env behind (Docker creates it when the file is missing).
+if [ -d .env ]; then rm -rf .env; fi
+
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "Created .env in $(pwd)"

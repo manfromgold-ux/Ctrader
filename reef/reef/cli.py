@@ -7,6 +7,7 @@ import logging
 import sys
 import time
 
+from . import __version__
 from .config import Config
 from .context import Context
 from .jobs import heal, prune, report, scout, spawn
@@ -15,6 +16,7 @@ from .scheduler import loop, tick
 
 def doctor(ctx: Context, notify: bool) -> int:
     problems = 0
+    print(f"Reef version {__version__}")
     missing = ctx.cfg.missing()
     if missing:
         print(f"[x] missing settings: {', '.join(missing)} (see .env.example)")
@@ -61,6 +63,7 @@ def status(ctx: Context) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="reef", description="Autonomous fleet of paid Apify Actors.")
+    parser.add_argument("--version", action="version", version=f"reef {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run", help="run forever (what the Docker container does)")
     sub.add_parser("tick", help="run every due job once and exit (for cron)")
@@ -90,6 +93,14 @@ def main(argv: list[str] | None = None) -> int:
         cfg.pause_file.unlink(missing_ok=True)
         print("Resumed.")
         return 0
+    if args.cmd == "run":
+        logging.getLogger("reef").info("Reef %s starting", __version__)
+        while cfg.missing():  # wait for the keys instead of crash-looping the container
+            logging.getLogger("reef").error(
+                "Missing settings: %s. Put your keys in the .env file next to docker-compose.yml, "
+                "then run: docker compose restart   (checking again in 60s)", ", ".join(cfg.missing()))
+            time.sleep(60)
+            cfg = Config.from_env()
     if args.cmd not in ("status", "candidates") and cfg.missing():
         print(f"Missing settings: {', '.join(cfg.missing())}. Copy .env.example to .env and fill it in.")
         return 1

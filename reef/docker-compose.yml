@@ -3,12 +3,13 @@ services:
     build: .
     environment:
       REEF_DATA_DIR: /data
-      REEF_ENV_FILE: /app/.env
+      REEF_ENV_FILE: /config/.env
     volumes:
       - ./data:/data
-      # Reef reads .env itself (tolerates Notepad's BOM and CRLF). Restart after editing it:
-      #   docker compose restart
-      - ./.env:/app/.env:ro
+      # The whole folder, read-only, so Reef can read .env itself (tolerates Notepad's BOM and CRLF).
+      # Mounting .env alone would make Docker create a *folder* named .env when the file is missing.
+      # After editing .env run:  docker compose restart
+      - ./:/config:ro
     restart: unless-stopped
     logging:
       driver: json-file

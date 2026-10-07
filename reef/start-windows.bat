@@ -7,6 +7,9 @@ echo === Reef: checking Docker ===
 docker info >nul 2>&1
 if errorlevel 1 goto nodocker
 
+rem An older setup could leave a FOLDER named .env behind (Docker creates it when the file is missing).
+if exist ".env\" rmdir /s /q ".env"
+
 if exist ".env" goto checkkeys
 copy /y ".env.example" ".env" >nul
 echo.
@@ -41,6 +44,13 @@ echo === Starting Reef in the background ===
 docker compose up -d
 if errorlevel 1 goto failed
 
+echo Waiting 15 seconds to make sure it keeps running...
+timeout /t 15 /nobreak >nul
+docker compose ps --status running --quiet > "%TEMP%\reef_ps.txt"
+for %%A in ("%TEMP%\reef_ps.txt") do if %%~zA==0 goto notrunning
+
+echo.
+docker compose exec reef python -m reef status
 echo.
 echo Reef is running. It starts again by itself whenever Docker Desktop starts.
 echo Useful commands - open a terminal in this folder and type:
@@ -74,6 +84,15 @@ echo.
 echo Some checks failed - see the lines marked [x] above.
 echo Fix the key in .env - Notepad opens it now - save, then double-click this file again.
 start notepad ".env"
+pause
+exit /b 1
+
+:notrunning
+echo.
+echo Reef stopped right after starting. Its last messages:
+docker compose logs --tail 40
+echo.
+echo Copy the messages above and send them for help.
 pause
 exit /b 1
 
