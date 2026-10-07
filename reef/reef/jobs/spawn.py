@@ -10,6 +10,7 @@ from ..llm import LLMError, extract_block, extract_json
 from ..prompts import BUILD_SYSTEM, build_user
 from ..spec import ActorSpec, SpecError, normalize
 from ..state import DAY
+from . import Retry
 from .common import Check, local_check, ship
 
 log = logging.getLogger("reef.spawn")
@@ -120,12 +121,15 @@ def build_candidate(ctx: Context, cand: dict) -> str | None:
     return spec.name
 
 
-def run(ctx: Context) -> str | None:
+def run(ctx: Context) -> str | None | Retry:
     reason = blocked_reason(ctx)
     if reason:
         log.info("spawn skipped: %s", reason)
         return None
-    for cand in ctx.state.candidates("new")[:3]:
+    queue = ctx.state.candidates("new")
+    if not queue:
+        return Retry(0.5, "no candidates yet")
+    for cand in queue[:3]:
         try:
             name = build_candidate(ctx, dict(cand))
         except Exception as exc:
@@ -135,4 +139,6 @@ def run(ctx: Context) -> str | None:
             continue
         if name:
             return name
+    if ctx.state.candidates("new"):
+        return Retry(3, "no build succeeded yet; more candidates waiting")
     return None

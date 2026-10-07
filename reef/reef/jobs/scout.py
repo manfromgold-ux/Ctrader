@@ -8,6 +8,7 @@ from ..context import Context
 from ..fetch import host_of, is_blocked_domain, same_site, visible_text_length
 from ..llm import LLMError, extract_json
 from ..prompts import SCOUT_SYSTEM, scout_user
+from . import Retry
 
 log = logging.getLogger("reef.scout")
 STRONG_INCUMBENT_USERS30 = 200
@@ -75,14 +76,18 @@ def evaluate(ctx: Context, idea: dict, source: str = "scout") -> str:
     return "new"
 
 
-def run(ctx: Context, n: int = 10) -> int:
+def run(ctx: Context, n: int = 10) -> int | Retry:
     exclude = sorted(ctx.state.known_domains())
     try:
         reply = ctx.llm.complete(SCOUT_SYSTEM, scout_user(n, exclude, ctx.cfg.blocked_domains),
                                  purpose="scout", max_tokens=4000, allow_paid=False)
     except LLMError as exc:
         ctx.state.log("error", f"scout: {exc}")
-        return 0
-    added = sum(1 for idea in _ideas(extract_json(reply.text)) if evaluate(ctx, idea) == "new")
-    ctx.state.log("scout", f"{added} new candidates from {reply.model}")
-    return added
+        return Retry(1, "models unavailable")
+    ideas = _ideas(extract_json(reply.text))
+    if not ideas:
+        ctx.state.log("error", f"scout: no site list in the reply from {reply.model}: {reply.text[:200]!r}")
+        return Retry(1, "unusable model reply")
+    added = sum(1 for idea in ideas if evaluate(ctx, idea) == "new")
+    ctx.state.log("scout", f"{added} new candidates out of {len(ideas)} ideas from {reply.model}")
+    return added if added else Retry(2, "every idea was rejected")

@@ -110,7 +110,7 @@ def test_pending_when_pricing_api_refuses(site, make_ctx):
 def test_caps_and_strong_incumbents(site, make_ctx, cfg):
     hits = [StoreHit("127.0.0.1 Scraper", "x", "rival", "scrapes 127.0.0.1", users30=900, rating=4.8)]
     ctx = make_ctx(FakeLLM({"scout": [scout_reply(site.base)]}), FakeApify(store_hits=hits))
-    assert scout.run(ctx) == 0
+    assert "rejected" in scout.run(ctx).reason  # nothing usable: try again in a couple of hours
     assert "strong incumbent" in ctx.state.candidates()[0]["reason"]
 
     cfg.max_new_actors_per_week = 0
@@ -165,3 +165,16 @@ def test_spawn_survives_apify_api_errors(site, make_ctx):
     cand = ctx.state.candidates()[0]
     assert cand["status"] == "failed" and "API said no" in cand["reason"]
     assert apify.deleted == ["act1"]  # half-created Actor cleaned up
+
+
+def test_failed_or_empty_jobs_retry_soon(make_ctx):
+    from reef.jobs import Retry
+
+    ctx = make_ctx(FakeLLM({"scout": ["I only make music"]}), FakeApify())
+    t0 = 1_000_000_000.0
+    ran = scheduler.tick(ctx, now=t0)
+    assert isinstance(ran["scout"], Retry) and isinstance(ran["spawn"], Retry)
+    assert "unusable model reply" in ran["scout"].reason
+    assert "scout" not in scheduler.tick(ctx, now=t0 + 1800)  # not yet
+    again = scheduler.tick(ctx, now=t0 + 3700)
+    assert "scout" in again and "spawn" in again and "report" not in again

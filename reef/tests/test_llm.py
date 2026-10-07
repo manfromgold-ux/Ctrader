@@ -6,21 +6,64 @@ import pytest
 from reef.llm import LLMError, OpenRouter, extract_block, extract_json, pick_models
 from reef.state import State
 
+
+def _client(handler):
+    return httpx.Client(base_url="https://openrouter.test/api/v1", transport=httpx.MockTransport(handler))
+
+
+TEXT = {"modality": "text->text", "input_modalities": ["text"], "output_modalities": ["text"]}
 CATALOGUE = [
-    {"id": "qwen/qwen3-coder:free", "context_length": 262000, "pricing": {"prompt": "0", "completion": "0"}},
-    {"id": "meta-llama/llama-3.3-70b-instruct:free", "context_length": 131000,
+    {"id": "qwen/qwen3-coder:free", "context_length": 262000, "architecture": TEXT,
+     "pricing": {"prompt": "0", "completion": "0", "request": "0"}},
+    {"id": "meta-llama/llama-3.3-70b-instruct:free", "context_length": 131000, "architecture": TEXT,
      "pricing": {"prompt": "0", "completion": "0"}},
-    {"id": "tiny/model:free", "context_length": 8000, "pricing": {"prompt": "0", "completion": "0"}},
-    {"id": "qwen/qwen3-coder", "context_length": 262000, "pricing": {"prompt": "0.0000003", "completion": "0.0000012"}},
-    {"id": "anthropic/expensive", "context_length": 200000, "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+    {"id": "tiny/model:free", "context_length": 8000, "architecture": TEXT, "pricing": {"prompt": "0", "completion": "0"}},
+    # The real-world trap: a music model with $0 token prices but a per-clip fee and audio output.
+    {"id": "google/lyria-3-clip-preview", "context_length": 1000000,
+     "architecture": {"modality": "text->audio", "input_modalities": ["text"], "output_modalities": ["audio"]},
+     "pricing": {"prompt": "0", "completion": "0", "request": "0.04"}},
+    {"id": "some/image-gen:free", "context_length": 100000,
+     "architecture": {"modality": "text->image", "output_modalities": ["image"]},
+     "pricing": {"prompt": "0", "completion": "0"}},
+    {"id": "promo/zero-price-chat", "context_length": 100000, "architecture": TEXT,
+     "pricing": {"prompt": "0", "completion": "0"}},
+    {"id": "qwen/qwen3-coder", "context_length": 262000, "architecture": TEXT,
+     "pricing": {"prompt": "0.0000003", "completion": "0.0000012"}},
+    {"id": "qwen/qwen3-coder-with-fee", "context_length": 262000, "architecture": TEXT,
+     "pricing": {"prompt": "0.0000003", "completion": "0.0000012", "request": "0.01"}},
+    {"id": "anthropic/expensive", "context_length": 200000, "architecture": TEXT,
+     "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
 ]
 
 
-def test_pick_models():
+def test_pick_models_only_true_free_text_models():
     free, paid = pick_models(CATALOGUE, max_paid_price_per_mtok=3.0)
-    assert free[0] == "qwen/qwen3-coder:free"
-    assert "tiny/model:free" not in free  # context too small
+    assert free == ["qwen/qwen3-coder:free", "meta-llama/llama-3.3-70b-instruct:free"]
     assert paid == "qwen/qwen3-coder"
+
+
+def _chat(text, cost=0.0):
+    return httpx.Response(200, json={"choices": [{"message": {"content": text}}], "usage": {"cost": cost}})
+
+
+def test_probe_drops_models_that_cannot_chat(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.llm.FREE_MIN_INTERVAL_S", 0)
+    state = State(tmp_path / "db")
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": CATALOGUE})
+        model = json.loads(request.content)["model"]
+        if model == "qwen/qwen3-coder:free":
+            return httpx.Response(429, json={"error": "rate limited upstream"})  # busy, kept as backup
+        if model.startswith("meta-llama"):
+            return _chat("Sure! Here is a poem instead.")  # cannot follow instructions: dropped
+        return _chat('{"ok": true}', 0.0001)
+
+    llm = OpenRouter("k", state, client=_client(handler))
+    free, paid = llm.models()
+    assert free == ["qwen/qwen3-coder:free"] and paid == "qwen/qwen3-coder"
+    assert state.get("openrouter_models_v2")["free"] == free  # cached under the new key
 
 
 def test_extract_blocks():
@@ -31,11 +74,9 @@ def test_extract_blocks():
     assert extract_json("no json here") is None
 
 
-def _client(handler):
-    return httpx.Client(base_url="https://openrouter.test/api/v1", transport=httpx.MockTransport(handler))
-
-
-def test_falls_back_from_free_to_paid_and_tracks_cost(tmp_path):
+def test_falls_back_from_free_to_paid_and_tracks_cost(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.llm.FREE_MIN_INTERVAL_S", 0)
+    monkeypatch.setattr("reef.llm.RATE_LIMIT_RETRY_WAIT_S", 0)
     state = State(tmp_path / "db")
     seen = []
 
@@ -43,33 +84,53 @@ def test_falls_back_from_free_to_paid_and_tracks_cost(tmp_path):
         if request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": CATALOGUE})
         body = json.loads(request.content)
+        if body["messages"][1]["content"] == "ping":
+            return _chat('{"ok": true}', 0.0 if body["model"].endswith(":free") else 0.0001)
         seen.append(body["model"])
         if body["model"].endswith(":free"):
             return httpx.Response(429, json={"error": "rate limited"})
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}], "usage": {"cost": 0.012}})
+        return _chat("ok", 0.012)
 
     llm = OpenRouter("k", state, client=_client(handler), monthly_budget_usd=1.0)
     out = llm.complete("s", "u", purpose="test")
     assert out.text == "ok" and out.model == "qwen/qwen3-coder"
-    assert seen[-1] == "qwen/qwen3-coder" and seen[0].endswith(":free")
-    assert state.llm_spend_since(0) == pytest.approx(0.012)
+    assert seen == ["qwen/qwen3-coder:free", "meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen3-coder"]
+    assert state.llm_spend_since(0) == pytest.approx(0.012 + 0.0001)  # task + one paid probe
 
     seen.clear()
     llm.complete("s", "u", purpose="retry", prefer_paid=True)
     assert seen == ["qwen/qwen3-coder"]  # paid first on retries
 
 
-def test_budget_cap_blocks_paid(tmp_path):
+def test_free_only_gets_second_pass_after_rate_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.llm.FREE_MIN_INTERVAL_S", 0)
+    monkeypatch.setattr("reef.llm.RATE_LIMIT_RETRY_WAIT_S", 0)
+    calls = []
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        calls.append(model)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": "rate limited"})
+        return _chat("hello")
+
+    llm = OpenRouter("k", State(tmp_path / "db"), free_models=["a/b:free"], paid_model="", client=_client(handler))
+    assert llm.complete("s", "u", purpose="t", allow_paid=False).text == "hello"
+    assert calls == ["a/b:free", "a/b:free"]
+
+
+def test_budget_cap_blocks_paid(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.llm.FREE_MIN_INTERVAL_S", 0)
     state = State(tmp_path / "db")
     state.record_llm_call("qwen/qwen3-coder", "earlier", 5.0, True)
 
     def handler(request):
-        if request.url.path.endswith("/models"):
-            return httpx.Response(200, json={"data": CATALOGUE})
-        if json.loads(request.content)["model"].endswith(":free"):
+        body = json.loads(request.content)
+        if body["model"].endswith(":free"):
             return httpx.Response(503, text="down")
         raise AssertionError("paid model must not be called once the budget is spent")
 
-    llm = OpenRouter("k", state, client=_client(handler), monthly_budget_usd=5.0)
+    llm = OpenRouter("k", state, free_models=["x/y:free"], paid_model="qwen/qwen3-coder", client=_client(handler),
+                     monthly_budget_usd=5.0)
     with pytest.raises(LLMError, match="budget"):
         llm.complete("s", "u", purpose="test")

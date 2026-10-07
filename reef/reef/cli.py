@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "tick":
         print(tick(ctx))
     elif args.cmd == "scout":
-        print(f"{scout.run(ctx)} new candidates")
+        print(scout.run(ctx))
     elif args.cmd == "spawn":
         print(spawn.run(ctx) or "nothing published (see `python -m reef status`)")
     elif args.cmd == "heal":

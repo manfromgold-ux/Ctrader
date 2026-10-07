@@ -6,7 +6,7 @@ import time
 from typing import Callable
 
 from .context import Context
-from .jobs import heal, prune, report, scout, spawn
+from .jobs import Retry, heal, prune, report, scout, spawn
 
 log = logging.getLogger("reef.scheduler")
 MIN_CANDIDATE_QUEUE = 8
@@ -49,6 +49,8 @@ def tick(ctx: Context, now: float | None = None) -> dict[str, object]:
         try:
             ran[name] = fn(ctx)
             log.info("%s -> %s", name, ran[name] if name != "report" else "sent")
+            if isinstance(ran[name], Retry):  # due again after the retry delay, not the full interval
+                ctx.state.put(f"last_run:{name}", t - hours * 3600 + ran[name].hours * 3600)
         except Exception as exc:  # one failing job must never stop the others
             log.exception("%s crashed", name)
             ctx.state.log("error", f"{name} crashed: {type(exc).__name__}: {exc}")

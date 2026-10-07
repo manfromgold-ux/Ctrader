@@ -15,7 +15,12 @@ API = "https://openrouter.ai/api/v1"
 # Preference order when picking models automatically from OpenRouter's live catalogue.
 FREE_PREFERENCES = [r"coder", r"qwen3", r"deepseek", r"gpt-oss", r"kimi", r"glm", r"llama-3\.3-70b", r"gemma"]
 PAID_PREFERENCES = [r"qwen3-coder", r"deepseek-(chat|v3)", r"kimi-k2", r"gpt-oss-120b", r"glm-4", r"gemini-.*flash"]
+# Price components that must be zero even for a paid model: Reef only pays per token, never per call.
+PER_CALL_FEES = ("request", "image", "audio", "web_search")
 FREE_MIN_INTERVAL_S = 3.2  # OpenRouter allows 20 requests/minute on free models
+RATE_LIMIT_RETRY_WAIT_S = 20.0
+MODELS_CACHE_KEY = "openrouter_models_v2"  # bump to discard cached picks made by older selection logic
+PROBE_SYSTEM = 'Reply with exactly this JSON and nothing else: {"ok": true}'
 
 
 class LLMError(RuntimeError):
@@ -41,27 +46,53 @@ def _match_order(model_id: str, prefs: list[str]) -> int:
     return len(prefs)
 
 
-def pick_models(catalogue: list[dict], max_paid_price_per_mtok: float) -> tuple[list[str], str]:
-    """Choose up to 4 free models and one paid model from OpenRouter's /models payload."""
+def _prices(pricing: dict) -> dict[str, float] | None:
+    out = {}
+    for key, value in (pricing or {}).items():
+        try:
+            out[key] = float(value or 0)
+        except (TypeError, ValueError):
+            return None
+    return out
+
+
+def is_text_chat_model(m: dict) -> bool:
+    """True only for text-in/text-out chat models (excludes music, image, video and embedding models)."""
+    arch = m.get("architecture") or {}
+    outputs = arch.get("output_modalities")
+    if outputs is not None:
+        return list(outputs) == ["text"] and "text" in (arch.get("input_modalities") or ["text"])
+    modality = str(arch.get("modality") or "")
+    return modality.startswith("text") and modality.endswith("->text")
+
+
+def pick_models(catalogue: list[dict], max_paid_price_per_mtok: float, n_free: int = 10) -> tuple[list[str], str]:
+    """Choose free-model candidates and one paid model from OpenRouter's /models payload.
+
+    Free means an official ':free' variant whose every price component is zero. Both lists contain only
+    text chat models; anything with per-request, image or audio fees is skipped.
+    """
     free, paid = [], []
     for m in catalogue:
         mid = m.get("id", "")
         ctx = int(m.get("context_length") or 0)
-        if ctx < 32_000:
+        prices = _prices(m.get("pricing") or {})
+        if ctx < 32_000 or prices is None or not is_text_chat_model(m):
             continue
-        pricing = m.get("pricing") or {}
-        try:
-            prompt_price = float(pricing.get("prompt", "1")) * 1e6
-            completion_price = float(pricing.get("completion", "1")) * 1e6
-        except (TypeError, ValueError):
+        if any(prices.get(k, 0) > 0 for k in PER_CALL_FEES):
             continue
-        if mid.endswith(":free") or (prompt_price == 0 and completion_price == 0):
-            free.append((_match_order(mid, FREE_PREFERENCES), -ctx, mid))
-        elif completion_price <= max_paid_price_per_mtok and _match_order(mid, PAID_PREFERENCES) < len(PAID_PREFERENCES):
-            paid.append((_match_order(mid, PAID_PREFERENCES), completion_price, mid))
+        if mid.endswith(":free"):
+            if all(v == 0 for v in prices.values()):
+                free.append((_match_order(mid, FREE_PREFERENCES), -ctx, mid))
+            continue
+        completion_per_m = prices.get("completion", 1) * 1e6
+        prompt_per_m = prices.get("prompt", 1) * 1e6
+        if (0 < completion_per_m <= max_paid_price_per_mtok and prompt_per_m <= max_paid_price_per_mtok
+                and _match_order(mid, PAID_PREFERENCES) < len(PAID_PREFERENCES)):
+            paid.append((_match_order(mid, PAID_PREFERENCES), completion_per_m, mid))
     free.sort()
     paid.sort()
-    return [m for _, _, m in free[:4]], (paid[0][2] if paid else "")
+    return [m for _, _, m in free[:n_free]], (paid[0][2] if paid else "")
 
 
 def extract_block(text: str, lang: str) -> str | None:
@@ -88,6 +119,11 @@ def extract_json(text: str, lang: str = "json"):
             return None
 
 
+def _rate_limited(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "rate" in text
+
+
 class OpenRouter:
     def __init__(self, api_key: str, state: State, *, free_models: list[str] | None = None,
                  paid_model: str = "auto", max_paid_price_per_mtok: float = 3.0, monthly_budget_usd: float = 15.0,
@@ -106,16 +142,47 @@ class OpenRouter:
 
     # ---- model selection -------------------------------------------------------------------
     def models(self) -> tuple[list[str], str]:
+        """Free models to try (in order) and the paid fallback. Picked from the live catalogue; every
+        candidate is test-called once a day so non-chat or broken models never get real work."""
         if self._free and (self._paid or not self._auto_paid):
             return self._free, self._paid
-        cached = self.state.get("openrouter_models")
+        cached = self.state.get(MODELS_CACHE_KEY)
         if not cached or time.time() - cached["ts"] > DAY:
             resp = self._http.get("/models")
             resp.raise_for_status()
             free, paid = pick_models(resp.json().get("data", []), self.max_paid_price_per_mtok)
+            free = self._free or self._probe(free, keep=5)
+            if paid and self._auto_paid and not self._probe([paid], keep=1, paid=True):
+                paid = ""
             cached = {"ts": time.time(), "free": free, "paid": paid}
-            self.state.put("openrouter_models", cached)
+            self.state.put(MODELS_CACHE_KEY, cached)
         return (self._free or cached["free"]), (self._paid or (cached["paid"] if self._auto_paid else ""))
+
+    def _probe(self, candidates: list[str], keep: int, paid: bool = False) -> list[str]:
+        """Keep models that answer a tiny JSON task. Rate-limited ones are kept as backups (busy is not
+        broken); anything that errors otherwise or answers wrongly is dropped."""
+        working, busy = [], []
+        for model in candidates:
+            if len(working) >= keep:
+                break
+            if not paid:
+                self._wait_free_slot()
+            try:
+                text, cost = self._call(model, PROBE_SYSTEM, "ping", max_tokens=400, paid=paid)
+                self.state.record_llm_call(model, "probe", cost, True)
+                if extract_json(text) == {"ok": True}:
+                    working.append(model)
+            except (LLMError, httpx.HTTPError) as exc:
+                self.state.record_llm_call(model, "probe", 0.0, False)
+                if _rate_limited(exc):
+                    busy.append(model)
+        return (working + busy)[:keep]
+
+    def _wait_free_slot(self) -> None:
+        wait = FREE_MIN_INTERVAL_S - (time.monotonic() - self._last_free_call)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_free_call = time.monotonic()
 
     def budget_left(self) -> float:
         return self.monthly_budget_usd - self.state.llm_spend_since(month_start())
@@ -148,27 +215,34 @@ class OpenRouter:
     def complete(self, system: str, user: str, *, purpose: str, max_tokens: int = 6000,
                  allow_paid: bool = True, prefer_paid: bool = False) -> Completion:
         """Try free models, then the paid one. With prefer_paid (used for retries after a free model
-        already failed at the task), the paid model goes first while budget remains."""
+        already failed at the task), the paid model goes first while budget remains. Free models are often
+        briefly rate-limited upstream, so they get a second pass after a short pause."""
         free, paid = self.models()
         errors: list[str] = []
         use_paid = allow_paid and bool(paid)
         if use_paid and self.budget_left() <= 0.05:
             errors.append(f"paid model skipped: monthly LLM budget ${self.monthly_budget_usd:.2f} used up")
             use_paid = False
-        order = [(m, False) for m in free]
+        free_pass = [(m, False) for m in free]
+        order = list(free_pass)
         if use_paid:
             order = [(paid, True)] + order if prefer_paid else order + [(paid, True)]
-        for model, is_paid in order:
-            if not is_paid:
-                wait = FREE_MIN_INTERVAL_S - (time.monotonic() - self._last_free_call)
-                if wait > 0:
-                    time.sleep(wait)
-                self._last_free_call = time.monotonic()
-            try:
-                text, cost = self._call(model, system, user, max_tokens, paid=is_paid)
-                self.state.record_llm_call(model, purpose, cost, True)
-                return Completion(text, model, cost)
-            except (LLMError, httpx.HTTPError) as exc:
-                self.state.record_llm_call(model, purpose, 0.0, False)
-                errors.append(str(exc)[:160])
+        for attempt in range(2):
+            rate_limited = False
+            for model, is_paid in order:
+                if not is_paid:
+                    self._wait_free_slot()
+                try:
+                    text, cost = self._call(model, system, user, max_tokens, paid=is_paid)
+                    self.state.record_llm_call(model, purpose, cost, True)
+                    return Completion(text, model, cost)
+                except (LLMError, httpx.HTTPError) as exc:
+                    self.state.record_llm_call(model, purpose, 0.0, False)
+                    errors.append(str(exc)[:160])
+                    rate_limited |= not is_paid and _rate_limited(exc)
+            if attempt == 0 and rate_limited:
+                time.sleep(RATE_LIMIT_RETRY_WAIT_S)
+                order = free_pass  # second pass: free models only; the paid one already had its turn
+            else:
+                break
         raise LLMError("all models failed: " + " || ".join(errors))
