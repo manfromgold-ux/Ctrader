@@ -7,6 +7,10 @@ echo === Reef: checking Docker ===
 docker info >nul 2>&1
 if errorlevel 1 goto nodocker
 
+rem Files copied over an older version can end up mixed; refuse to build from a broken folder.
+findstr /c:"from .cli import main" "reef\__main__.py" >nul 2>&1
+if errorlevel 1 goto brokencopy
+
 rem An older setup could leave a FOLDER named .env behind (Docker creates it when the file is missing).
 if exist ".env\" rmdir /s /q ".env"
 
@@ -93,6 +97,14 @@ echo Reef stopped right after starting. Its last messages:
 docker compose logs --tail 40
 echo.
 echo Copy the messages above and send them for help.
+pause
+exit /b 1
+
+:brokencopy
+echo.
+echo The files in this folder are mixed up (probably copied over an older version).
+echo Keep your .env file, delete this folder, extract the zip again into an EMPTY folder,
+echo put .env back next to start-windows.bat and run this file again.
 pause
 exit /b 1
 

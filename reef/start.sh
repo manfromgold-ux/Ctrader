@@ -23,6 +23,12 @@ edit_env() {
   fi
 }
 
+if ! grep -q "from .cli import main" reef/__main__.py 2>/dev/null; then
+  echo "The files in this folder are mixed up (probably copied over an older version)."
+  echo "Keep your .env, delete this folder, extract the zip into an empty folder and run ./start.sh again."
+  exit 1
+fi
+
 # An older setup could leave a FOLDER named .env behind (Docker creates it when the file is missing).
 if [ -d .env ]; then rm -rf .env; fi
 
