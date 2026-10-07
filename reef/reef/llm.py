@@ -122,6 +122,38 @@ def extract_json(text: str, lang: str = "json"):
             return None
 
 
+def extract_objects(text: str) -> list[dict]:
+    """Every complete top-level {...} object in the text that parses as JSON. Salvages lists that were
+    cut off mid-way (token limit) or that contain one malformed entry."""
+    objects, depth, start, in_str, escaped = [], 0, -1, False, False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"' and depth > 0:
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                chunk = re.sub(r",\s*([}\]])", r"\1", text[start:i + 1])
+                try:
+                    obj = json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    objects.append(obj)
+    return objects
+
+
 def _rate_limited(exc: Exception) -> bool:
     text = str(exc).lower()
     return "429" in text or "rate" in text

@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from reef.llm import LLMError, OpenRouter, extract_block, extract_json, pick_models
+from reef.llm import LLMError, OpenRouter, extract_block, extract_json, extract_objects, pick_models
 from reef.state import State
 
 
@@ -134,3 +134,20 @@ def test_budget_cap_blocks_paid(tmp_path, monkeypatch):
                      monthly_budget_usd=5.0)
     with pytest.raises(LLMError, match="budget"):
         llm.complete("s", "u", purpose="test")
+
+
+def test_salvages_truncated_or_partly_broken_lists():
+    from reef.jobs.scout import ideas_from
+
+    cut_off = (
+        '```json\n[\n  {\n    "domain": "tender.gov.ua",\n    "start_url": "https://tender.gov.ua/procurements",\n'
+        '    "data": "tenders {with braces} and \\"quotes\\"", "search_terms": ["tenders", "ua"]\n  },\n'
+        '  {"domain": "broken.pl", "start_url": "https://broken.pl" "missing": "comma"},\n'
+        '  {"domain": "ok.cz", "start_url": "https://ok.cz/list", "data": "x",},\n'
+        '  {"domain": "cut.de", "start_url": "https://cut.de/li'
+    )
+    assert extract_json(cut_off) is None
+    assert [o["domain"] for o in extract_objects(cut_off)] == ["tender.gov.ua", "ok.cz"]
+    assert [i["domain"] for i in ideas_from(cut_off)] == ["tender.gov.ua", "ok.cz"]
+    assert ideas_from('{"sites": [{"domain": "a.pl", "start_url": "https://a.pl"}]}')[0]["domain"] == "a.pl"
+    assert ideas_from("I only make music") == []

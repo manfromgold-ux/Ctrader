@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 from ..context import Context
 from ..fetch import host_of, is_blocked_domain, same_site, visible_text_length
-from ..llm import LLMError, extract_json
+from ..llm import LLMError, extract_json, extract_objects
 from ..prompts import SCOUT_SYSTEM, scout_user
 from . import Retry
 
@@ -15,10 +16,15 @@ STRONG_INCUMBENT_USERS30 = 200
 MIN_VISIBLE_TEXT = 1500
 
 
-def _ideas(raw) -> list[dict]:
+def ideas_from(text: str) -> list[dict]:
+    """Site ideas from a model reply: the whole JSON list if it parses, else every complete entry."""
+    raw = extract_json(text)
     if isinstance(raw, dict):
         raw = next((v for v in raw.values() if isinstance(v, list)), [])
-    return [i for i in raw or [] if isinstance(i, dict)]
+    ideas = [i for i in raw or [] if isinstance(i, dict)] if isinstance(raw, list) else []
+    if not ideas:
+        ideas = extract_objects(text)
+    return [i for i in ideas if i.get("start_url") or i.get("domain")]
 
 
 def competition(ctx: Context, domain: str, terms: list[str]) -> tuple[int, int]:
@@ -76,16 +82,24 @@ def evaluate(ctx: Context, idea: dict, source: str = "scout") -> str:
     return "new"
 
 
+def _save_reply(ctx: Context, purpose: str, text: str) -> None:
+    """Keep unreadable model replies in data/debug/ so they can be inspected."""
+    folder = ctx.cfg.data_dir / "debug"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{purpose}-{time.strftime('%Y%m%d-%H%M%S')}.txt").write_text(text, encoding="utf-8")
+
+
 def run(ctx: Context, n: int = 10) -> int | Retry:
     exclude = sorted(ctx.state.known_domains())
     try:
         reply = ctx.llm.complete(SCOUT_SYSTEM, scout_user(n, exclude, ctx.cfg.blocked_domains),
-                                 purpose="scout", max_tokens=4000, allow_paid=False)
+                                 purpose="scout", max_tokens=8000, allow_paid=False)
     except LLMError as exc:
         ctx.state.log("error", f"scout: {exc}")
         return Retry(1, "models unavailable")
-    ideas = _ideas(extract_json(reply.text))
+    ideas = ideas_from(reply.text)
     if not ideas:
+        _save_reply(ctx, "scout", reply.text)
         ctx.state.log("error", f"scout: no site list in the reply from {reply.model}: {reply.text[:200]!r}")
         return Retry(1, "unusable model reply")
     added = sum(1 for idea in ideas if evaluate(ctx, idea) == "new")

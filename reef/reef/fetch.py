@@ -8,7 +8,8 @@ from urllib.parse import urlsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
-from lxml import etree, html as lxml_html
+from lxml import etree
+from lxml import html as lxml_html
 
 # Same browser-like UA as the Actor engine, so canary checks see the page the Actor sees.
 USER_AGENT = (

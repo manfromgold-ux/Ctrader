@@ -6,11 +6,11 @@ import logging
 import time
 
 from ..context import Context
-from ..llm import LLMError, extract_json
+from ..llm import LLMError
 from ..prompts import CLONE_SYSTEM, clone_user
 from ..state import DAY
 from .heal import refresh_stats
-from .scout import _ideas, evaluate
+from .scout import evaluate, ideas_from
 
 log = logging.getLogger("reef.prune")
 
@@ -20,11 +20,11 @@ def clone_winner(ctx: Context, row) -> int:
     try:
         reply = ctx.llm.complete(CLONE_SYSTEM, clone_user(spec, row["users30"], 5, sorted(ctx.state.known_domains()),
                                                           ctx.cfg.blocked_domains),
-                                 purpose="clone", max_tokens=3000, allow_paid=False)
+                                 purpose="clone", max_tokens=6000, allow_paid=False)
     except LLMError as exc:
         ctx.state.log("error", f"clone: {exc}", actor=row["name"])
         return 0
-    added = sum(1 for idea in _ideas(extract_json(reply.text)) if evaluate(ctx, idea, source="clone") == "new")
+    added = sum(1 for idea in ideas_from(reply.text) if evaluate(ctx, idea, source="clone") == "new")
     ctx.state.update_actor(row["name"], cloned=1)
     ctx.state.log("cloned", f"{added} sibling candidates queued", actor=row["name"])
     return added
