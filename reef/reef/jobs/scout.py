@@ -4,9 +4,13 @@ from __future__ import annotations
 import logging
 import re
 import time
+from urllib.parse import urldefrag, urlsplit
+
+from lxml import etree
+from lxml import html as lxml_html
 
 from ..context import Context
-from ..fetch import host_of, is_blocked_domain, same_site, visible_text_length
+from ..fetch import FetchResult, host_of, is_blocked_domain, same_site, visible_text_length
 from ..llm import LLMError, extract_json, extract_objects
 from ..prompts import SCOUT_SYSTEM, scout_user
 from . import Retry
@@ -14,6 +18,16 @@ from . import Retry
 log = logging.getLogger("reef.scout")
 STRONG_INCUMBENT_USERS30 = 200
 MIN_VISIBLE_TEXT = 1500
+# Link words that usually lead to listing pages (several languages), and links never worth following.
+LISTING_WORDS = (
+    "tender", "procure", "notice", "auction", "job", "vacanc", "career", "offer", "listing", "search", "catalog",
+    "product", "categor", "director", "compan", "event", "result", "list", "zakup", "przetarg", "ausschreib",
+    "licita", "concurso", "annonce", "angebot", "oferta", "ogloszen", "immobil", "property", "vergabe", "zakazk",
+)
+SKIP_LINK_WORDS = (
+    "login", "signin", "sign-in", "register", "account", "contact", "privacy", "cookie", "terms", "about", "help",
+    "faq", "cart", "basket", "mailto:", "tel:", "javascript:", ".pdf", ".jpg", ".png", ".zip", ".doc", ".xls",
+)
 
 
 def ideas_from(text: str) -> list[dict]:
@@ -44,6 +58,45 @@ def competition(ctx: Context, domain: str, terms: list[str]) -> tuple[int, int]:
     return len(seen), max(seen.values(), default=0)
 
 
+def discover_listing(ctx: Context, domain: str, idea: dict) -> FetchResult | None:
+    """The model's guessed URL failed: open the homepage and follow its most listing-like links."""
+    home = None
+    parts = urlsplit(str(idea.get("start_url") or ""))
+    roots = [f"{parts.scheme}://{parts.netloc}/"] if parts.scheme in ("http", "https") and parts.netloc else []
+    for url in dict.fromkeys(roots + [f"https://{domain}/", f"https://www.{domain}/"]):
+        page = ctx.fetcher.get(url)
+        if page.ok:
+            home = page
+            break
+    if home is None:
+        return None
+    hints = {w for w in re.findall(r"[a-z\u00c0-\u024f]{4,}",
+                                   f"{idea.get('data', '')} {' '.join(map(str, idea.get('search_terms') or []))} "
+                                   f"{idea.get('start_url', '')}".lower())} - {"https", "http", "www"}
+    try:
+        doc = lxml_html.fromstring(home.html, base_url=home.final_url or f"https://{domain}/")
+        doc.make_links_absolute()
+    except (etree.ParserError, ValueError):
+        return None
+    scored: dict[str, int] = {}
+    for a in doc.iter("a"):
+        href = urldefrag(a.get("href") or "")[0]
+        text = a.text_content().lower()
+        low = href.lower()
+        if not href.startswith(("http://", "https://")) or not same_site(href, domain):
+            continue
+        if any(w in low or w in text for w in SKIP_LINK_WORDS):
+            continue
+        score = sum(2 for w in hints if w in low or w in text) + sum(1 for w in LISTING_WORDS if w in low or w in text)
+        if score:
+            scored[href] = max(score, scored.get(href, 0))
+    for href, _ in sorted(scored.items(), key=lambda kv: -kv[1])[:4]:
+        page = ctx.fetcher.get(href)
+        if page.ok and visible_text_length(page.html) >= MIN_VISIBLE_TEXT:
+            return page
+    return home if visible_text_length(home.html) >= MIN_VISIBLE_TEXT else None
+
+
 def evaluate(ctx: Context, idea: dict, source: str = "scout") -> str:
     """Check one idea and store it as a candidate. Returns 'new', 'rejected' or 'skipped'."""
     start_url = str(idea.get("start_url") or "").strip()
@@ -67,6 +120,11 @@ def evaluate(ctx: Context, idea: dict, source: str = "scout") -> str:
         return reject(f"strong incumbent on Apify Store ({rival_users} users/30d)")
 
     page = ctx.fetcher.get(start_url)
+    if not page.ok and not page.blocked:  # usually a guessed path that does not exist (404) or is off-limits
+        found = discover_listing(ctx, domain, idea)
+        if found is not None:
+            log.info("%s: suggested page failed (%s), using %s instead", domain, page.describe(), found.final_url)
+            page = found
     if not page.ok:
         return reject(f"start page not usable: {page.describe()}")
     text_len = visible_text_length(page.html)
@@ -89,7 +147,7 @@ def _save_reply(ctx: Context, purpose: str, text: str) -> None:
     (folder / f"{purpose}-{time.strftime('%Y%m%d-%H%M%S')}.txt").write_text(text, encoding="utf-8")
 
 
-def run(ctx: Context, n: int = 10) -> int | Retry:
+def run(ctx: Context, n: int = 15) -> int | Retry:
     exclude = sorted(ctx.state.known_domains())
     try:
         reply = ctx.llm.complete(SCOUT_SYSTEM, scout_user(n, exclude, ctx.cfg.blocked_domains),

@@ -39,6 +39,8 @@ def scout_user(n: int, exclude: list[str], blocked: list[str]) -> str:
   existing scrapers. Mix countries and languages.
 - Records must be about businesses, products, listings or notices - NOT private individuals.
 - Someone would plausibly pay $2 per 1,000 records for it every week. Say who.
+- start_url must be a page you are confident exists. If you are not sure of the exact path, give the site's
+  homepage - the listing page will be found from there.
 - Do NOT propose any of these (already covered or forbidden): {", ".join(sorted(set(exclude + blocked))[:300])}
 
 Respond with one ```json block holding a list of objects:

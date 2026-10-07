@@ -178,3 +178,13 @@ def test_failed_or_empty_jobs_retry_soon(make_ctx):
     assert "scout" not in scheduler.tick(ctx, now=t0 + 1800)  # not yet
     again = scheduler.tick(ctx, now=t0 + 3700)
     assert "scout" in again and "spawn" in again and "report" not in again
+
+
+def test_scout_finds_listing_page_when_suggested_url_is_wrong(site, make_ctx):
+    ctx = make_ctx(FakeLLM({}), FakeApify())
+    for bad_path in ("/does-not-exist", "/private/listings"):  # a 404, and a path robots.txt forbids
+        ctx.state._conn.execute("DELETE FROM candidates")
+        idea = {"domain": "127.0.0.1", "start_url": site.base + bad_path, "data": "public tenders",
+                "search_terms": ["tenders"]}
+        assert scout.evaluate(ctx, idea) == "new"
+        assert ctx.state.candidates("new")[0]["start_url"].endswith("/tenders?q=roads&page=1")

@@ -65,6 +65,11 @@ class FakeSite:
                 qs = parse_qs(parts.query)
                 if parts.path == "/robots.txt":
                     return self._send(200, "User-agent: *\nDisallow: /private/\n", "text/plain")
+                if parts.path == "/" and site.layout != "v3":
+                    links = ('<a href="/about">About us</a> <a href="/login">Log in</a> '
+                             '<a href="/tenders?q=roads&page=1">Current public tenders</a>')
+                    return self._send(200, f"<html><body><h1>City portal</h1>{links}"
+                                           f"<p>{'Welcome to the portal. ' * 40}</p></body></html>")
                 if site.layout == "v3":
                     return self._send(200, "<html><body><p>" + "Maintenance in progress. " * 100 + "</p></body></html>")
                 if site.layout == "v1" and parts.path == "/tenders":
