@@ -24,6 +24,8 @@ RATE_LIMIT_RETRY_WAIT_S = 20.0
 MODELS_CACHE_KEY = "openrouter_models_v3"  # bump to discard cached picks made by older selection logic
 PROBE_SYSTEM = 'Reply with exactly this JSON and nothing else: {"ok": true}'
 PROBE_TIMEOUT_S = 45.0  # a model that cannot answer "ping" in 45s is no use to us today
+TASK_TIMEOUT_S = 180.0  # one model gets at most 3 minutes per task before we move on
+TASK_DEADLINE_S = 600.0  # and one task gets at most 10 minutes across all models
 
 
 class LLMError(RuntimeError):
@@ -276,18 +278,27 @@ class OpenRouter:
         order = list(free_pass)
         if use_paid:
             order = [(paid, True)] + order if prefer_paid else order + [(paid, True)]
+        started = time.monotonic()
         for attempt in range(2):
             rate_limited = False
             for model, is_paid in order:
+                if time.monotonic() - started > TASK_DEADLINE_S:
+                    errors.append(f"gave up after {TASK_DEADLINE_S / 60:.0f} minutes")
+                    raise LLMError("all models failed: " + " || ".join(errors))
                 if not is_paid:
                     self._wait_free_slot()
+                log.info("%s: asking %s (this can take a few minutes)...", purpose, model)
+                t0 = time.monotonic()
                 try:
-                    text, cost = self._call(model, system, user, max_tokens, paid=is_paid)
+                    text, cost = self._call(model, system, user, max_tokens, paid=is_paid, timeout=TASK_TIMEOUT_S)
                     self.state.record_llm_call(model, purpose, cost, True)
+                    log.info("%s: %s answered in %.0fs", purpose, model, time.monotonic() - t0)
                     return Completion(text, model, cost)
                 except (LLMError, httpx.HTTPError) as exc:
                     self.state.record_llm_call(model, purpose, 0.0, False)
                     errors.append(str(exc)[:160])
+                    log.info("%s: %s failed after %.0fs (%s), trying the next one",
+                             purpose, model, time.monotonic() - t0, str(exc)[:100])
                     rate_limited |= not is_paid and _transient(exc)
             if attempt == 0 and rate_limited:
                 time.sleep(RATE_LIMIT_RETRY_WAIT_S)

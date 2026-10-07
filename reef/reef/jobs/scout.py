@@ -149,6 +149,7 @@ def _save_reply(ctx: Context, purpose: str, text: str) -> None:
 
 def run(ctx: Context, n: int = 15) -> int | Retry:
     exclude = sorted(ctx.state.known_domains())
+    log.info("asking the AI for %d site ideas...", n)
     try:
         reply = ctx.llm.complete(SCOUT_SYSTEM, scout_user(n, exclude, ctx.cfg.blocked_domains),
                                  purpose="scout", max_tokens=8000, allow_paid=False)
@@ -160,6 +161,11 @@ def run(ctx: Context, n: int = 15) -> int | Retry:
         _save_reply(ctx, "scout", reply.text)
         ctx.state.log("error", f"scout: no site list in the reply from {reply.model}: {reply.text[:200]!r}")
         return Retry(1, "unusable model reply")
-    added = sum(1 for idea in ideas if evaluate(ctx, idea) == "new")
+    log.info("got %d ideas, checking each site (Apify Store, robots.txt, the page itself)...", len(ideas))
+    added = 0
+    for idea in ideas:
+        if evaluate(ctx, idea) == "new":
+            added += 1
+            log.info("accepted %s", idea.get("domain") or idea.get("start_url"))
     ctx.state.log("scout", f"{added} new candidates out of {len(ideas)} ideas from {reply.model}")
     return added if added else Retry(2, "every idea was rejected")
