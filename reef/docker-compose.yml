@@ -1,11 +1,14 @@
 services:
   reef:
     build: .
-    env_file: .env
     environment:
       REEF_DATA_DIR: /data
+      REEF_ENV_FILE: /app/.env
     volumes:
       - ./data:/data
+      # Reef reads .env itself (tolerates Notepad's BOM and CRLF). Restart after editing it:
+      #   docker compose restart
+      - ./.env:/app/.env:ro
     restart: unless-stopped
     logging:
       driver: json-file

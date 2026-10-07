@@ -53,3 +53,15 @@ def test_check_items():
     assert not rel.ok and "absolute" in " ".join(rel.errors)
     optional_missing = check_items(spec, _items(value_eur=None))
     assert optional_missing.ok and optional_missing.warnings
+
+
+def test_dotenv_tolerates_notepad(tmp_path, monkeypatch):
+    from reef.config import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_bytes("﻿# comment\r\nREEF_T1=abc \r\nREEF_T2=\r\nREEF_T3=\"quoted\"\r\n".encode("utf-8"))
+    for k in ("REEF_T1", "REEF_T2", "REEF_T3"):
+        monkeypatch.delenv(k, raising=False)
+    load_dotenv(env)
+    import os
+    assert os.environ["REEF_T1"] == "abc" and os.environ["REEF_T2"] == "" and os.environ["REEF_T3"] == "quoted"

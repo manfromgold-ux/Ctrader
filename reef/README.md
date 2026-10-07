@@ -30,7 +30,26 @@ Scrapers break whenever a website changes its layout. Broken scrapers lose ranki
    - Sign up at openrouter.ai and buy **$10** of credits. This one-time purchase raises free-model limits to 1,000 requests a day.
    - Create an API key. Setting a credit limit on the key is a good extra safety net.
 3. **Notifications.** Set up a Telegram bot, an SMTP e-mail account, or both (see `.env.example`).
-4. **A small Linux server with Docker.** Any ~$5/month VPS works. Then run:
+4. **Start it on your home PC (Docker Desktop):**
+   1. Get the code. Download the branch as a ZIP from GitHub (*Code → Download ZIP*) and unzip it, or run `git clone -b claude/festive-pascal-s4yap3 https://github.com/manfromgold-ux/Ctrader.git`.
+   2. Open the `reef` folder.
+   3. Run the start script:
+      - **Windows:** double-click `start-windows.bat`.
+      - **Mac/Linux:** run `./start.sh` in a terminal.
+
+   The script then does the rest:
+   - creates `.env` and opens it in Notepad (or TextEdit / nano);
+   - after you paste the keys and save, checks them and sends a test message;
+   - starts Reef in Docker.
+
+   To change a key later, edit `.env` and run `docker compose restart` in the `reef` folder.
+
+   **Keeping it running on a home PC:**
+   - In Docker Desktop, turn on *Settings → General → Start Docker Desktop when you sign in*.
+   - In Windows power settings, set *Sleep* to *Never* while plugged in.
+   - If the PC is off, **your scrapers keep selling.** Customers' runs happen on Apify's servers. Only health checks, repairs and new builds pause, and they catch up when the PC is back.
+
+   **Or use a small Linux server** (~$5/month VPS) so nothing depends on your PC:
 
    ```bash
    git clone <this repo> && cd <repo>/reef
