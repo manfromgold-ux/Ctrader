@@ -7,7 +7,7 @@ import time
 
 from ..context import Context
 from ..fetch import trim_html
-from ..llm import LLMError, extract_block, extract_json
+from ..llm import LLMError, extract_code, extract_spec
 from ..prompts import BUILD_SYSTEM, build_user
 from ..spec import ActorSpec, SpecError, normalize
 from ..state import DAY
@@ -38,6 +38,12 @@ def _unique_name(ctx: Context, spec: ActorSpec) -> None:
         n += 1
 
 
+def _save_reply(ctx: Context, purpose: str, text: str) -> None:
+    folder = ctx.cfg.data_dir / "debug"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{purpose}-{time.strftime('%Y%m%d-%H%M%S')}.txt").write_text(text, encoding="utf-8")
+
+
 def _error_context(failure: str, code: str) -> str:
     """For a syntax error, show the model the exact lines around it (the code shown later may be cut)."""
     m = re.search(r"SyntaxError.*?\(line (\d+)\)", failure)
@@ -58,9 +64,13 @@ def design(ctx: Context, cand: dict, page_url: str, page_html: str) -> tuple[Act
                                      purpose="build", max_tokens=16000, prefer_paid=attempt > 0)
         except LLMError as exc:
             return f"LLM unavailable: {exc}"
-        raw_spec, code = extract_json(reply.text, "json"), extract_block(reply.text, "python")
+        raw_spec, code = extract_spec(reply.text), extract_code(reply.text)
         if not isinstance(raw_spec, dict) or not code:
-            feedback = "Your answer must contain one ```json block (the spec object) and one ```python block."
+            _save_reply(ctx, "build", reply.text)
+            missing = " and ".join(n for n, ok in (("the ```json spec block", isinstance(raw_spec, dict)),
+                                                   ("the ```python extractor block", bool(code))) if not ok)
+            feedback = (f"Your answer was missing {missing}. Reply with exactly two fenced blocks: ```json with "
+                        "the spec object, then ```python with the full extractor module. Keep both short.")
             continue
         try:
             spec = normalize(raw_spec, cand["domain"])
@@ -124,12 +134,14 @@ def build_candidate(ctx: Context, cand: dict) -> str | None:
     else:
         why = f"pricing: {price_err}" if not priced else f"publishing: {pub_err}"
         state.log("pending", f"built but not published ({why})", actor=spec.name)
-        ctx.notifier.send(
-            f"Action needed: {spec.name}",
-            f"{spec.title} is built and tested but Reef could not finish {why}.\n"
-            f"Open https://console.apify.com/actors/{actor_id} -> Publication, set pay-per-result pricing "
-            f"(${cfg.price_per_1000_results:.2f}/1,000 results) and publish. Reef notices and takes over again.",
-        )
+        if "cannot-monetize" in price_err:
+            todo = ("Apify needs your billing and payment details before any price can be set (one time only). "
+                    f"Open https://console.apify.com/actors/{actor_id} -> Publication -> Monetization and complete "
+                    "the billing/payment form it asks for. Reef then prices and publishes all waiting Actors itself.")
+        else:
+            todo = (f"Open https://console.apify.com/actors/{actor_id} -> Publication, set pay-per-result pricing "
+                    f"(${cfg.price_per_1000_results:.2f}/1,000 results) and publish. Reef notices and takes over.")
+        ctx.notifier.send(f"Action needed: {spec.name}", f"{spec.title} is built and tested.\n{todo}")
     return spec.name
 
 

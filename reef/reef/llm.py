@@ -107,6 +107,34 @@ def extract_block(text: str, lang: str) -> str | None:
     return blocks[-1].strip() if blocks else None
 
 
+def extract_code(text: str) -> str | None:
+    """The extractor module from a reply: a ```python/```py/```python3 block, else any fenced block that
+    defines both required functions (models often omit or vary the language tag)."""
+    blocks = re.findall(r"```[ \t]*([a-zA-Z0-9_+-]*)[^\n]*\n(.*?)```", text, flags=re.DOTALL)
+    tagged = [body for tag, body in blocks if tag.lower() in ("python", "py", "python3")]
+    for body in reversed(tagged or [b for _, b in blocks]):
+        if "def parse" in body and "def start_urls" in body:
+            return body.strip()
+    if tagged:
+        return tagged[-1].strip()
+    # unterminated last block (reply cut off before the closing fence): take it if it looks complete enough
+    tail = re.search(r"```[ \t]*(?:python3?|py)[^\n]*\n(.*)$", text, flags=re.DOTALL | re.IGNORECASE)
+    if tail and "def parse" in tail.group(1) and "def start_urls" in tail.group(1):
+        return tail.group(1).strip()
+    return None
+
+
+def extract_spec(text: str) -> dict | None:
+    """The spec object from a build reply: the ```json block, else the first JSON object with 'fields'."""
+    raw = extract_json(text, "json")
+    if isinstance(raw, dict) and raw.get("fields"):
+        return raw
+    for obj in extract_objects(text):
+        if obj.get("fields") and obj.get("title"):
+            return obj
+    return raw if isinstance(raw, dict) else None
+
+
 def extract_json(text: str, lang: str = "json"):
     body = extract_block(text, lang)
     if body is None:

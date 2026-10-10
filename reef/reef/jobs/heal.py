@@ -13,7 +13,7 @@ from .. import actor_pkg
 from ..apify_gw import VERSION
 from ..context import Context
 from ..fetch import trim_html
-from ..llm import LLMError, extract_block
+from ..llm import LLMError, extract_code
 from ..prompts import HEAL_SYSTEM, heal_user
 from ..spec import ActorSpec
 from ..state import DAY
@@ -71,7 +71,7 @@ def repair(ctx: Context, row, spec: ActorSpec, check: Check) -> tuple[str, str]:
         except LLMError as exc:
             failure = f"LLM unavailable: {exc}"
             break
-        candidate = extract_block(reply.text, "python")
+        candidate = extract_code(reply.text)
         if not candidate:
             failure = "model reply had no ```python block"
             continue

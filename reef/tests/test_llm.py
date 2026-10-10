@@ -3,7 +3,16 @@ import json
 import httpx
 import pytest
 
-from reef.llm import LLMError, OpenRouter, extract_block, extract_json, extract_objects, pick_models
+from reef.llm import (
+    LLMError,
+    OpenRouter,
+    extract_block,
+    extract_code,
+    extract_json,
+    extract_objects,
+    extract_spec,
+    pick_models,
+)
 from reef.state import State
 
 
@@ -173,3 +182,22 @@ def test_overloaded_counts_as_busy_and_thinking_models_get_clear_error(tmp_path,
         llm.complete("s", "u", purpose="t", allow_paid=False)  # overloaded -> retried -> ran out of tokens
     assert calls == ["a/b:free", "a/b:free"]
     assert llm.complete("s", "u", purpose="t", allow_paid=False).text == "hello"
+
+
+def test_tolerant_reply_parsing():
+    code = "def start_urls(p):\n    return []\n\ndef parse(h, u):\n    return {}"
+    spec = '{"title": "X Scraper", "fields": [{"name": "url"}]}'
+    assert extract_code(f"```py\n{code}\n```") == code
+    assert extract_code(f"```\n{spec}\n```\n```\n{code}\n```") == code  # untagged fences
+    assert extract_code(f"```python\n{code}") == code  # cut off before the closing fence
+    assert extract_code("```python\nprint(1)\n```") == "print(1)"
+    assert extract_code("no code") is None
+    assert extract_spec(f"Here:\n{spec}\nand code") == {"title": "X Scraper", "fields": [{"name": "url"}]}
+    assert extract_spec(f"```JSON\n{spec}\n```")["title"] == "X Scraper"
+
+
+def test_trim_html_survives_comments_outside_root():
+    from reef.fetch import trim_html
+
+    out = trim_html("<!-- top --><!DOCTYPE html><html><body><!-- in --><p class='a'>hi</p></body></html>", 1000)
+    assert "hi" in out and "in -->" not in out

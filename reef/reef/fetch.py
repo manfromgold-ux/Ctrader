@@ -161,7 +161,9 @@ def trim_html(page_html: str, max_chars: int) -> str:
     except (etree.ParserError, ValueError):
         return page_html[:max_chars]
     for node in doc.xpath("//comment()"):
-        node.getparent().remove(node)
+        parent = node.getparent()
+        if parent is not None:  # comments outside <html> have no parent
+            parent.remove(node)
     for node in doc.xpath("//script"):
         if (node.get("type") or "").lower() != "application/ld+json":
             node.drop_tree()
